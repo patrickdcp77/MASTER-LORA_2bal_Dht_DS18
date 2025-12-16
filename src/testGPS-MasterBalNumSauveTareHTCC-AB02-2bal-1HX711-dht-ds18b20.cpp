@@ -91,6 +91,7 @@ Pour coder un bit à 1, relier le GPIO à VCC via une résistance de 10 kΩ.
 #include <DHT.h>
 #include <DHT_U.h>
 #include "HX711.h"
+#include "GPS_Air530.h"
 
 // Définition des broches
 #define EEPROM_ADDR_TARE_A 0
@@ -109,12 +110,14 @@ DHT dht(DHTPIN, DHTTYPE);
 OneWire oneWire(ADC3);
 DallasTemperature ds(&oneWire);
 HX711 Hx711_N1;
+Air530Class GPS;
 
 // Variables globales
 float offset_HX711_N1_ChannelA;
 float offset_HX711_N1_ChannelB;
 const unsigned int Weight_sensitivity = 4;
 float humidite, temperature;
+bool gpsReady = false;
 /* OTAA para c'est ce OTAA paramètre qui est utilisé */
 
 uint8_t appEui[8] = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
@@ -208,6 +211,33 @@ uint8_t appPort = 2;
 uint8_t confirmedNbTrials = 4;
 int maxtry = 50;
 
+void gpsInit()
+{
+  GPS.begin();
+  gpsReady = true;
+}
+
+bool gpsPollUntilFix(uint32_t waitMs, float &lat, float &lon, float &alt, uint8_t &sats, uint16_t &hdop)
+{
+  if (!gpsReady) return false;
+  uint32_t start = millis();
+  while (millis() - start < waitMs) {
+    while (GPS.available()) {
+      GPS.encode(GPS.read());
+    }
+    if (GPS.location.isValid() && GPS.location.isUpdated()) {
+      lat = GPS.location.lat();
+      lon = GPS.location.lng();
+      alt = GPS.altitude.meters();
+      sats = GPS.satellites.value();
+      hdop = GPS.hdop.value();
+      return true;
+    }
+    delay(10);
+  }
+  return false;
+}
+
 
 
 static void prepareTxFrame( uint8_t port )
@@ -286,7 +316,7 @@ static void prepareTxFrame( uint8_t port )
 
   
   Serial.print(tDs);
-  Serial.println( " C  ");
+  Serial.println( " *C  ");
   Serial.print(tDs_byte,HEX);
   Serial.println(" Byte   ");
 
@@ -383,6 +413,37 @@ static void prepareTxFrame( uint8_t port )
   appData[10] = (uint8_t)(Weight_HX711_N1_Channel_B>>8);
   appData[11] = (uint8_t)Weight_HX711_N1_Channel_B;
 
+  float lat = 0;
+  float lon = 0;
+  float alt = 0;
+  uint8_t sats = 0;
+  uint16_t hdop = 0;
+  bool hasFix = gpsPollUntilFix(3000, lat, lon, alt, sats, hdop);
+
+  int32_t latEnc = hasFix ? (int32_t)(lat * 1e5) : 0;
+  int32_t lonEnc = hasFix ? (int32_t)(lon * 1e5) : 0;
+  int16_t altEnc = hasFix ? (int16_t)(alt * 10) : 0;
+
+  appData[12] = (uint8_t)(latEnc >> 24);
+  appData[13] = (uint8_t)(latEnc >> 16);
+  appData[14] = (uint8_t)(latEnc >> 8);
+  appData[15] = (uint8_t)latEnc;
+
+  appData[16] = (uint8_t)(lonEnc >> 24);
+  appData[17] = (uint8_t)(lonEnc >> 16);
+  appData[18] = (uint8_t)(lonEnc >> 8);
+  appData[19] = (uint8_t)lonEnc;
+
+  appData[20] = (uint8_t)(altEnc >> 8);
+  appData[21] = (uint8_t)altEnc;
+
+  appData[22] = sats;
+
+  appData[23] = (uint8_t)(hdop >> 8);
+  appData[24] = (uint8_t)hdop;
+
+  appDataSize = 25; // mise à jour taille totale après ajout GPS
+
 
   digitalWrite(Vext, HIGH); // pour déconnecter les capteurs branchés dur Vext
   
@@ -402,6 +463,8 @@ void setup() {
   Serial.println(__FILE__);
   deviceState = DEVICE_STATE_INIT;
   LoRaWAN.ifskipjoin();
+
+  gpsInit();
 
   pinMode(Vext, OUTPUT);
   digitalWrite(Vext, LOW);
