@@ -419,22 +419,51 @@ void setup() {
 
     // Si la tare n'est pas initialisée, on la mesure et on l'enregistre
     if (isnan(offset_HX711_N1_ChannelA) || offset_HX711_N1_ChannelA == 0.0) {
+        Serial.println("Initialisation HX711 Channel A...");
         Hx711_N1.begin(PIN_HX711_N1_DATA_OUT, PIN_HX711_N1_SCK_AND_POWER_DOWN, 64);
-        delay(500); // Ajoute ce délai pour laisser le HX711 se stabiliser
-        offset_HX711_N1_ChannelA = Hx711_N1.get_units();
-        EEPROM.put(0, offset_HX711_N1_ChannelA);
-        EEPROM.commit();
-        Serial.print("Initialisation tare HX711 Channel A : valeur brute = ");
-        Serial.println(offset_HX711_N1_ChannelA, 4);
+        delay(1000); // Délai pour stabilisation
+        
+        // Vérifier si le HX711 est prêt avec timeout
+        unsigned long startTime = millis();
+        while (!Hx711_N1.is_ready() && (millis() - startTime) < 5000) {
+            Serial.println("Attente HX711 Channel A...");
+            delay(100);
+        }
+        
+        if (Hx711_N1.is_ready()) {
+            offset_HX711_N1_ChannelA = Hx711_N1.get_units();
+            EEPROM.put(0, offset_HX711_N1_ChannelA);
+            EEPROM.commit();
+            Serial.print("Initialisation tare HX711 Channel A : valeur brute = ");
+            Serial.println(offset_HX711_N1_ChannelA, 4);
+        } else {
+            Serial.println("ERREUR : HX711 Channel A non détecté !");
+            offset_HX711_N1_ChannelA = 0.0;
+        }
     }
 
     if (isnan(offset_HX711_N1_ChannelB) || offset_HX711_N1_ChannelB == 0.0) {
+        Serial.println("Initialisation HX711 Channel B...");
         Hx711_N1.begin(PIN_HX711_N1_DATA_OUT, PIN_HX711_N1_SCK_AND_POWER_DOWN, 32);
-        offset_HX711_N1_ChannelB = Hx711_N1.get_units();
-        EEPROM.put(sizeof(float), offset_HX711_N1_ChannelB);
-        EEPROM.commit();
-        Serial.print("Initialisation tare HX711 Channel B : valeur brute = ");
-        Serial.println(offset_HX711_N1_ChannelB, 4);
+        delay(1000); // Délai pour stabilisation
+        
+        // Vérifier si le HX711 est prêt avec timeout
+        unsigned long startTime = millis();
+        while (!Hx711_N1.is_ready() && (millis() - startTime) < 5000) {
+            Serial.println("Attente HX711 Channel B...");
+            delay(100);
+        }
+        
+        if (Hx711_N1.is_ready()) {
+            offset_HX711_N1_ChannelB = Hx711_N1.get_units();
+            EEPROM.put(sizeof(float), offset_HX711_N1_ChannelB);
+            EEPROM.commit();
+            Serial.print("Initialisation tare HX711 Channel B : valeur brute = ");
+            Serial.println(offset_HX711_N1_ChannelB, 4);
+        } else {
+            Serial.println("ERREUR : HX711 Channel B non détecté !");
+            offset_HX711_N1_ChannelB = 0.0;
+        }
     }
 
 
