@@ -347,7 +347,7 @@ DeviceClass_t  loraWanClass = LORAWAN_CLASS;
 
 // Période d'envoi des données en millisecondes
 // 10000 = 10 secondes (test), 900000 = 15 minutes (production)
-uint32_t appTxDutyCycle =60000;//900000;// 10000;  toute les minutes
+uint32_t appTxDutyCycle =10000;//900000;// 10000;  toute les minutes
 
 // Mode d'activation: OTAA (true) ou ABP (false)
 bool overTheAirActivation = LORAWAN_NETMODE;

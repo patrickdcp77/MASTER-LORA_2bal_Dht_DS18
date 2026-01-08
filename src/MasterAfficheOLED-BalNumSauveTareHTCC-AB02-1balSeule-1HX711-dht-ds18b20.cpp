@@ -35,12 +35,12 @@ Architecture du code:
   * Encode en 10 octets pour transmission LoRa
   * Désactive Vext (économie d'énergie)
 
-Encodage de la trame LoRaWAN (10 octets):
+Encodage de la trame LoRaWAN (11 octets):
 [0-1]: Tension batterie (16 bits, millivolts, big-endian)
 [2-3]: Température DHT22 (8 bits encodé: (T+35)*2, + padding)
 [4-5]: Humidité DHT22 (8 bits encodé: H*2, + padding)
 [6-7]: Température DS18B20 (8 bits encodé: (T+35)*2, + padding)
-[8-9]: Poids (16 bits, grammes, big-endian)
+[8-10]: Poids (24 bits, grammes, big-endian, max ~16777 kg)
 
 ================================================================================
 CALIBRATION DE LA BALANCE
@@ -243,7 +243,7 @@ float humidite, temperature;
 uint8_t moduleNumber = 0;          // Numéro du module (1-32)
 uint16_t batteryVoltageGlobal = 0; // Tension batterie en mV
 float temperatureDS18Global = 0;   // Température DS18B20
-uint16_t weightGlobal = 0;         // Poids en grammes
+uint32_t weightGlobal = 0;         // Poids en grammes (24 bits utilisés, max ~16777 kg)
 
 //=============================================================================
 // SECTION 5: CONFIGURATION LORAWAN - OTAA (Over-The-Air Activation)
@@ -362,7 +362,7 @@ DeviceClass_t  loraWanClass = LORAWAN_CLASS;
 
 // Période d'envoi des données en millisecondes
 // 10000 = 10 secondes (test), 900000 = 15 minutes (production)
-uint32_t appTxDutyCycle =60000;//900000;// 10000;  toute les minutes
+uint32_t appTxDutyCycle =10000;//900000;// 10000;  toute les minutes**********************
 
 // Mode d'activation: OTAA (true) ou ABP (false)
 bool overTheAirActivation = LORAWAN_NETMODE;
@@ -407,7 +407,7 @@ void displayOLED() {
   oledDisplay.drawString(0, 0, String("Module: lora-") + String(moduleNumber));
   oledDisplay.drawString(0, 16, String("Bat: ") + String(batteryVoltageGlobal / 1000.0, 2) + String(" V"));
   oledDisplay.drawString(0, 32, String("Temp: ") + String(temperatureDS18Global, 1) + String(" C"));
-  oledDisplay.drawString(0, 48, String("Poids: ") + String(weightGlobal) + String(" g"));
+  oledDisplay.drawString(0, 48, String("Poids: ") + String(weightGlobal / 1000.0, 1) + String(" kg"));
   
   oledDisplay.display();
 }
@@ -485,12 +485,27 @@ static void prepareTxFrame( uint8_t port )
   
   delay(1000);                // Laisse le temps au capteur de se stabiliser
   
-  // Lecture de l'humidité (en pourcentage)
-  float h = dht.readHumidity();  
-  delay(1000);
-  
-  // Lecture de la température (en degrés Celsius)
+  // Lecture de l'humidité (en pourcentage) avec retry
+  float h = dht.readHumidity();
   float t = dht.readTemperature();
+  
+  // Vérification: si NaN, réessayer une fois après délai
+  if (isnan(h) || isnan(t)) {
+    Serial.println("DHT22: première lecture NaN, retry...");
+    delay(2000);
+    h = dht.readHumidity();
+    t = dht.readTemperature();
+  }
+  
+  // Si toujours NaN, utiliser 0 par défaut pour éviter les calculs invalides
+  if (isnan(t)) {
+    Serial.println("DHT22 temp: NaN après retry, valeur défaut = 0");
+    t = 0;
+  }
+  if (isnan(h)) {
+    Serial.println("DHT22 humidity: NaN après retry, valeur défaut = 0");
+    h = 0;
+  }
   
   // Encodage des valeurs sur 8 bits pour transmission LoRa
   // Formule: (température + 35) * 2 permet de coder -35°C à +92.5°C
@@ -566,7 +581,7 @@ static void prepareTxFrame( uint8_t port )
   
   Serial.println("Lecture balance HX711...");
   float Sample_weight = 0;                    // Poids calculé en grammes
-  unsigned int Weight_HX711_N1_Channel_A = 0; // Poids final (entier)
+  uint32_t Weight_HX711_N1_Channel_A = 0; // Poids final (24 bits utilisés pour supporter >100 kg)
     
   // Réinitialisation du HX711
   // Paramètres: (pin_data, pin_sck, gain)
@@ -633,10 +648,10 @@ static void prepareTxFrame( uint8_t port )
     if (Sample_weight < 0) { 
         Sample_weight = 0; 
     } else { 
-        // Si poids > 65535g (limite uint16), saturer à 65535
-        // (65535g = 65.5kg, largement suffisant pour 200kg max)
-        if (Sample_weight > 65535) { 
-            Sample_weight = 65535; 
+        // Si poids > 16777215g (limite 24 bits), saturer à 16777215
+        // (16777215g = 16777.2kg, largement suffisant pour 200kg max)
+        if (Sample_weight > 16777215) { 
+            Sample_weight = 16777215; 
         }
     }
 
@@ -665,15 +680,15 @@ static void prepareTxFrame( uint8_t port )
   //===========================================================================
   // ÉTAPE 6: ENCODAGE DES DONNÉES DANS LE BUFFER LORAWAN
   //===========================================================================
-  /* Structure de la trame LoRaWAN (10 octets):
+  /* Structure de la trame LoRaWAN (11 octets):
      appData[0-1]: Tension batterie (16 bits, millivolts)
      appData[2-3]: Température DHT22 (8 bits encodé + 0x00 de padding)
      appData[4-5]: Humidité DHT22 (8 bits encodé + 0x00 de padding)
      appData[6-7]: Température DS18B20 (8 bits encodé + 0x00 de padding)
-     appData[8-9]: Poids (16 bits, grammes)
+     appData[8-10]: Poids (24 bits, grammes, big-endian)
   */
 
-  appDataSize = 10;  // Taille totale de la trame en octets
+  appDataSize = 11;  // Taille totale de la trame en octets (2+2+2+2+3)
                      // À ajuster si on ajoute/retire des capteurs
 
   // Batterie: 16 bits big-endian
@@ -693,9 +708,19 @@ static void prepareTxFrame( uint8_t port )
   appData[6] = (uint8_t)(tDs_byte>>8);  // Toujours 0x00 car tDs_byte < 256
   appData[7] = (uint8_t)tDs_byte;
 
-  // Poids: 16 bits big-endian
-  appData[8] = (uint8_t)(Weight_HX711_N1_Channel_A>>8);
-  appData[9] = (uint8_t)Weight_HX711_N1_Channel_A;
+  // Poids: 24 bits big-endian (3 octets, MSB first)
+  // Conversion explicite en uint32_t pour éviter les débordements
+  uint32_t w = (uint32_t) lround(Weight_HX711_N1_Channel_A);
+  
+  // DEBUG: affichage de la valeur 32 bits et des octets
+  Serial.printf("Weight 32b = %lu (0x%06lX)\n", (unsigned long)w, (unsigned long)w);
+  
+  appData[8] = (uint8_t)((w >> 16) & 0xFF);  // Octet le plus haut
+  appData[9] = (uint8_t)((w >> 8)  & 0xFF);  // Octet du milieu
+  appData[10] = (uint8_t)( w        & 0xFF); // Octet le plus bas
+  
+  // DEBUG: affichage des 3 octets encodés
+  Serial.printf("Bytes = %u %u %u\n", appData[8], appData[9], appData[10]);
 
   //===========================================================================
   // ÉTAPE 7: MISE À JOUR DES VARIABLES GLOBALES POUR L'AFFICHAGE OLED
