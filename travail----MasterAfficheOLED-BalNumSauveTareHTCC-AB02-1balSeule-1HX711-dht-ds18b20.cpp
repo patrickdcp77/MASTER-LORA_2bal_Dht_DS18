@@ -71,29 +71,17 @@ fonctionne correctement
 dernier essai
 
 pour les balances, cablage des connecteurs étanches
-cordon CREME et plat (n'est plus utilisé)
-noire   A+
+cordon crème et plat
+noire   A,B+
 rouge   E-
 jaune   E+
-vert    A-
+vert    A,B-
 
-
-
--------------------------------------------------------------
-pour les balances, cablage des connecteurs étanches
-cordon BLANC et plat     connecteur noir 4 broches étanche
-jaune clair   A+         VERT    A+
-bleu    E-               NOIR    E-
-rouge    E+              ROUGE   E+
-blanc    A-              BLEU    A-
--------------------------------------------------------------
-
-
-correspondance avec les cables NOIRS étanches
-vert    A+
+correspondance avec les cables noirs étanches
+vert    A,B+
 noir    E-
 rouge   E+
-bleu    A-
+bleu    A,B-
 
 cablage des balances vues en dessous (donc platine porte jauges retournée)
 vue eu U inversé
@@ -244,48 +232,9 @@ SH1107Wire oledDisplay(0x3c, 500000, SDA, SCL, GEOMETRY_128_64, GPIO10);
 // Elle est mesurée automatiquement au premier démarrage (EEPROM = 0)
 float offset_HX711_N1_ChannelA;
 
-// Facteur de calibration de la balance (unités ADC par gramme)
-// Déterminé expérimentalement pour chaque balance avec un poids de 16kg
-// Formule : facteur = (tare - mesure_avec_16kg) / 16000
-// Chaque module/balance a son propre facteur
-float calibrationFactor;  // Chargé depuis calibrationFactorTable selon le module
-
-// Table des facteurs de calibration pour chaque module (lora-01 à lora-32)
-// À calibrer individuellement avec un poids connu de 16kg
-const float calibrationFactorTable[32] = {
-  20.16,  // lora-01 : À calibrer
-  22.587925,  //                          lora-02 : calibré
-  20.16,  // lora-03 : À calibrer
-  20.16,  // lora-04 : À calibrer
-  22.4823,//                              lora-05 : Calibré 01/02/2026 (Tare:160744.0, 16kg:-198972, Facteur:359716.0/16000, Erreur:±5.5%)
-  20.16,  // lora-06 : À calibrer
-  20.5288,//                              lora-07 : Calibré 01/02/2026 (Tare:236704.4, 16kg:-91756, Facteur:328460.4/16000, Erreur:±1.8%)
-  24.843676,  //                          lora-08 : calibré
-  20.16,  // lora-09 : À calibrer
-  20.16,  // lora-10 : À calibrer
-  20.16,  // lora-11 : À calibrer
-  20.16,  // lora-12 : À calibrer
-  20.16,  // lora-13 : À calibrer
-  20.16,  // lora-14 : À calibrer
-  20.16,  // lora-15 : À calibrer
-  20.16,  // lora-16 : À calibrer
-  20.16,  // lora-17 : À calibrer
-  20.16,  // lora-18 : À calibrer
-  20.16,  // lora-19 : À calibrer
-  20.16,  // lora-20 : À calibrer
-  20.16,  // lora-21 : À calibrer
-  20.16,  // lora-22 : À calibrer
-  20.16,  // lora-23 : À calibrer
-  20.16,  // lora-24 : À calibrer
-  20.16,  // lora-25 : À calibrer
-  20.16,  // lora-26 : À calibrer
-  20.16,  // lora-27 : À calibrer
-  20.16,  // lora-28 : À calibrer
-  20.16,  // lora-29 : À calibrer
-  20.16,  // lora-30 : À calibrer
-  24.911287,  // lora-31 :                LORA 31   Calibré    
-  20.16   // lora-32 : À calibrer
-};
+// Sensibilité du poids (non utilisée avec la nouvelle calibration)
+// Ancienne formule utilisait: /256 * Weight_sensitivity
+const unsigned int Weight_sensitivity = 4;
 
 // Variables pour stocker les mesures de température et humidité
 float humidite, temperature;
@@ -413,7 +362,7 @@ DeviceClass_t  loraWanClass = LORAWAN_CLASS;
 
 // Période d'envoi des données en millisecondes
 // 10000 = 10 secondes (test), 900000 = 15 minutes (production)
-uint32_t appTxDutyCycle =15000;//900000;// 10000;  toute les 10 secondes pour faire des tests intensifs**********************
+uint32_t appTxDutyCycle =60000;//900000;// 10000;  toute les 10 secondes pour faire des tests intensifs**********************
 
 // Mode d'activation: OTAA (true) ou ABP (false)
 bool overTheAirActivation = LORAWAN_NETMODE;
@@ -634,28 +583,31 @@ static void prepareTxFrame( uint8_t port )
   float Sample_weight = 0;                    // Poids calculé en grammes
   uint32_t Weight_HX711_N1_Channel_A = 0; // Poids final (24 bits utilisés pour supporter >100 kg)
     
-  // Réinitialisation du HX711 avec même séquence que la calibration
+  // Réinitialisation du HX711
   // Paramètres: (pin_data, pin_sck, gain)
   // Gain 64 = canal A (balance), gain 32 = canal B
+  Hx711_N1.begin(PIN_HX711_N1_DATA_OUT,PIN_HX711_N1_SCK_AND_POWER_DOWN,64 );
+  delay(1000); // Délai important après begin pour stabilisation
   
-  // Test GPIO avant HX711 (comme dans ROM-effacement et calibration)
-  pinMode(PIN_HX711_N1_DATA_OUT, INPUT);
-  pinMode(PIN_HX711_N1_SCK_AND_POWER_DOWN, OUTPUT);
-  digitalWrite(PIN_HX711_N1_SCK_AND_POWER_DOWN, HIGH);
-  delay(100);
+  //===========================================================================
+  // Vérifier si le HX711 est prêt avec timeout
+  //===========================================================================
+  // is_ready() vérifie si la pin DOUT est LOW (données disponibles)
+  Serial.println("Vérification disponibilité HX711...");
+  unsigned long startTime = millis();
+  int readAttempts = 0;
   
-  Hx711_N1.begin(PIN_HX711_N1_DATA_OUT, PIN_HX711_N1_SCK_AND_POWER_DOWN, 64);
-  
-  Serial.println("Attente 3 secondes pour stabilisation...");
-  delay(3000); // 3 secondes comme ROM-effacement et calibration
+  // Boucle d'attente max 5 secondes
+  while (!Hx711_N1.is_ready() && (millis() - startTime) < 5000) {
+    readAttempts++;
+    Serial.print("Attente HX711... tentative ");
+    Serial.println(readAttempts);
+    delay(200);
+  }
   
   if (Hx711_N1.is_ready()) {
-    Serial.println("HX711 DÉTECTÉ - Lecture en cours...");
-    delay(1000);
-    
-    // Lecture dummy pour initialiser la librairie
-    float dummy = Hx711_N1.get_units();
-    delay(1000);
+    Serial.println("HX711 prêt, lecture en cours...");
+    delay(200);
     
     //=========================================================================
     // Lecture de la valeur brute du HX711
@@ -679,13 +631,13 @@ static void prepareTxFrame( uint8_t port )
        - Donc la mesure DIMINUE quand on ajoute du poids
        - La différence (Tare - Mesure) donne donc un nombre positif
        
-       Facteur de calibration (spécifique à chaque balance):
-       - Déterminé expérimentalement avec un poids connu de 16kg
-       - Exemple: si différence = 330000 unités pour 16kg
-       - Facteur = 330000 / 16000 = 20.625 unités/gramme
-       - Chaque balance/module a son propre facteur (variations de fabrication)
+       Facteur de calibration 20.16:
+       - Déterminé expérimentalement avec 16.2kg de poids connu
+       - Différence mesurée: 326586 (252649 - (-73937))
+       - Facteur: 326586 / 16200g = 20.16
+       - Avec ce facteur, précision de 99% sur toute la plage
     */
-    Sample_weight = (offset_HX711_N1_ChannelA - Hx711_N1.get_units()) / calibrationFactor;
+    Sample_weight = (offset_HX711_N1_ChannelA - Hx711_N1.get_units())/20.16;
     Serial.print("Poids calculé : ");
     Serial.println(Sample_weight, 2);
 
@@ -887,13 +839,7 @@ void setup() {
     //===========================================================================
     // isnan() vérifie si la valeur est NaN (Not a Number = EEPROM vierge)
     // || 0.0 vérifie si la tare a été mise à zéro (effacement manuel)
-    // Les valeurs valides du HX711 sont généralement entre 900000 et 1100000
-    // Si tare < 800000 ou > 1200000, c'est suspect = recalibration
-    bool tareValide = !isnan(offset_HX711_N1_ChannelA) && 
-                      offset_HX711_N1_ChannelA > 800000 && 
-                      offset_HX711_N1_ChannelA < 1200000;
-    
-    if (isnan(offset_HX711_N1_ChannelA) || offset_HX711_N1_ChannelA == 0.0 || !tareValide) {
+    if (isnan(offset_HX711_N1_ChannelA) || offset_HX711_N1_ChannelA == 0.0) {
         //=======================================================================
         // CAS 1: PREMIÈRE UTILISATION - CALIBRATION AUTOMATIQUE
         //=======================================================================
@@ -909,81 +855,41 @@ void setup() {
         Serial.print("GPIO DATA : "); Serial.println(PIN_HX711_N1_DATA_OUT);
         Serial.print("GPIO SCK  : "); Serial.println(PIN_HX711_N1_SCK_AND_POWER_DOWN);
         
-        // RESET complet du HX711 pour éliminer tout état résiduel
-        pinMode(PIN_HX711_N1_DATA_OUT, INPUT);
-        pinMode(PIN_HX711_N1_SCK_AND_POWER_DOWN, OUTPUT);
-        
-        // Power-down puis power-up du HX711
-        digitalWrite(PIN_HX711_N1_SCK_AND_POWER_DOWN, HIGH);
-        delayMicroseconds(100);  // Power-down (SCK HIGH > 60µs)
-        digitalWrite(PIN_HX711_N1_SCK_AND_POWER_DOWN, LOW);
-        delay(500);  // Attente power-up complet
-        
-        // Test GPIO avant HX711 (comme dans ROM-effacement)
-        digitalWrite(PIN_HX711_N1_SCK_AND_POWER_DOWN, HIGH);
-        delay(100);
-        
-        Serial.print("État GPIO6 (DATA) : "); Serial.println(digitalRead(PIN_HX711_N1_DATA_OUT));
-        Serial.print("GPIO7 (SCK) : "); Serial.println(digitalRead(PIN_HX711_N1_SCK_AND_POWER_DOWN));
-        
         // Initialise le HX711 avec gain 64 (canal A)
         Hx711_N1.begin(PIN_HX711_N1_DATA_OUT, PIN_HX711_N1_SCK_AND_POWER_DOWN, 64);
+        delay(2000); // Délai prolongé pour stabilisation du capteur
         
-        Serial.println("Attente 3 secondes pour stabilisation...");
-        delay(3000); // 3 secondes comme ROM-effacement
+        //=======================================================================
+        // Attente que le HX711 soit prêt (avec timeout de 10 secondes)
+        //=======================================================================
+        Serial.println("Vérification HX711...");
+        unsigned long startTime = millis();
+        int attempts = 0;
+        
+        // Boucle d'attente maximum 10 secondes
+        while (!Hx711_N1.is_ready() && (millis() - startTime) < 10000) {
+            attempts++;
+            Serial.print("Attente HX711 Channel A... tentative ");
+            Serial.println(attempts);
+            delay(200);
+        }
         
         if (Hx711_N1.is_ready()) {
             //===================================================================
             // HX711 prêt: mesure et sauvegarde de la tare
             //===================================================================
-            Serial.println("✓ HX711 DÉTECTÉ - Lecture de la valeur brute...");
-            delay(1000);
+            Serial.println("HX711 prêt ! Lecture de la tare...");
+            delay(500);
             
-            // IMPORTANT: Lecture dummy pour initialiser la librairie HX711
-            // (comme dans le code ROM-effacement)
-            float dummy = Hx711_N1.get_units();
-            Serial.print("Lecture dummy (initialisation) : ");
-            Serial.println(dummy, 2);
-            delay(1000);
+            // get_units() lit la valeur brute de l'ADC (balance vide)
+            offset_HX711_N1_ChannelA = Hx711_N1.get_units();
             
-            // Mesure de la tare avec moyenne de 5 lectures pour plus de stabilité
-            Serial.println("Mesure de la tare (5 lectures)...");
-            float sum = 0;
-            int validReadings = 0;
+            // Sauvegarde dans l'EEPROM pour les prochains démarrages
+            EEPROM.put(0, offset_HX711_N1_ChannelA);
+            EEPROM.commit();  // Valide l'écriture en EEPROM
             
-            for (int i = 0; i < 5; i++) {
-                if (Hx711_N1.is_ready()) {
-                    float reading = Hx711_N1.get_units();
-                    Serial.print("  Lecture ");
-                    Serial.print(i+1);
-                    Serial.print(" : ");
-                    Serial.println(reading, 2);
-                    sum += reading;
-                    validReadings++;
-                } else {
-                    Serial.print("  Lecture ");
-                    Serial.print(i+1);
-                    Serial.println(" : HX711 pas prêt!");
-                }
-                delay(500);
-            }
-            
-            // Calcul de la moyenne
-            if (validReadings > 0) {
-                offset_HX711_N1_ChannelA = sum / validReadings;
-                
-                // Sauvegarde dans l'EEPROM pour les prochains démarrages
-                EEPROM.put(0, offset_HX711_N1_ChannelA);
-                EEPROM.commit();  // Valide l'écriture en EEPROM
-                
-                Serial.print("Initialisation tare HX711 Channel A : moyenne de ");
-                Serial.print(validReadings);
-                Serial.print(" lectures = ");
-                Serial.println(offset_HX711_N1_ChannelA, 4);
-            } else {
-                Serial.println("ERREUR : Aucune lecture valide pour la tare !");
-                offset_HX711_N1_ChannelA = 0.0;
-            }
+            Serial.print("Initialisation tare HX711 Channel A : valeur brute = ");
+            Serial.println(offset_HX711_N1_ChannelA, 4);
         } else {
             //===================================================================
             // ERREUR: HX711 non détecté
@@ -1100,11 +1006,6 @@ void setup() {
   
   // Copie de l'appKey (16 octets) depuis appKeyTable
   memcpy(appKey, appKeyTable[encoderValue - 1], 16);
-  
-  // Chargement du facteur de calibration depuis la table
-  calibrationFactor = calibrationFactorTable[encoderValue - 1];
-  Serial.print("Facteur de calibration pour ce module : ");
-  Serial.println(calibrationFactor, 4);
 
   //=============================================================================
   // Affichage des identifiants pour vérification
