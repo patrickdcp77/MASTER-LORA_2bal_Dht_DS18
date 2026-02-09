@@ -200,6 +200,19 @@ VERSION: 1.0 - Code entièrement commenté pour utilisation pédagogique
 // La tare est la valeur brute mesurée quand la balance est vide
 #define EEPROM_ADDR_TARE_A 0
 
+// Plage plausible pour la tare (valeurs brutes HX711)
+// Valeurs negatives possibles selon le cablage et le gain
+const float TARE_MIN_VALUE = -10000000.0;
+const float TARE_MAX_VALUE = 10000000.0;
+
+// Signature pour valider la tare en EEPROM
+const uint32_t TARE_MAGIC = 0x54415245; // "TARE"
+
+struct TareData {
+  uint32_t magic;
+  float offset;
+};
+
 // Configuration du capteur DHT22 (température et humidité)
 #define DHTPIN GPIO5              // Pin de données du DHT22
 #define DHTTYPE DHT22             // Type de capteur (DHT22 ou DHT11)
@@ -253,7 +266,7 @@ float calibrationFactor;  // Chargé depuis calibrationFactorTable selon le modu
 // Table des facteurs de calibration pour chaque module (lora-01 à lora-32)
 // À calibrer individuellement avec un poids connu de 16kg
 const float calibrationFactorTable[32] = {
-  20.16,  // lora-01 : À calibrer
+  21.503426,  // lora-01 :                lora-01  calibré
   22.587925,  //                          lora-02 : calibré
   20.16,  // lora-03 : À calibrer
   20.16,  // lora-04 : À calibrer
@@ -283,7 +296,7 @@ const float calibrationFactorTable[32] = {
   20.16,  // lora-28 : À calibrer
   20.16,  // lora-29 : À calibrer
   20.16,  // lora-30 : À calibrer
-  24.911287,  // lora-31 :                LORA 31   Calibré    
+  24.951414,  // lora-31 :                LORA 31   Calibré    
   20.16   // lora-32 : À calibrer
 };
 
@@ -875,11 +888,17 @@ void setup() {
     
     EEPROM.begin(64);  // Réserve 64 octets d'EEPROM
 
-    // Lecture de la tare enregistrée à l'adresse 0
-    // get() lit un float (4 octets) depuis l'EEPROM
-    EEPROM.get(0, offset_HX711_N1_ChannelA);
+    // Lecture de la tare en EEPROM avec signature
+    TareData tareData;
+    EEPROM.get(EEPROM_ADDR_TARE_A, tareData);
 
-    Serial.print("Tare A lue en EEPROM : "); 
+    if (tareData.magic == TARE_MAGIC) {
+      offset_HX711_N1_ChannelA = tareData.offset;
+    } else {
+      offset_HX711_N1_ChannelA = NAN;
+    }
+
+    Serial.print("Tare A lue en EEPROM : ");
     Serial.println(offset_HX711_N1_ChannelA, 4);
 
     //===========================================================================
@@ -887,11 +906,11 @@ void setup() {
     //===========================================================================
     // isnan() vérifie si la valeur est NaN (Not a Number = EEPROM vierge)
     // || 0.0 vérifie si la tare a été mise à zéro (effacement manuel)
-    // Les valeurs valides du HX711 sont généralement entre 900000 et 1100000
-    // Si tare < 800000 ou > 1200000, c'est suspect = recalibration
-    bool tareValide = !isnan(offset_HX711_N1_ChannelA) && 
-                      offset_HX711_N1_ChannelA > 800000 && 
-                      offset_HX711_N1_ChannelA < 1200000;
+    // Valeurs valides du HX711 : plage large pour eviter les recalibrations inutiles
+    // Si tare hors plage, c'est suspect = recalibration
+    bool tareValide = !isnan(offset_HX711_N1_ChannelA) &&
+              offset_HX711_N1_ChannelA > TARE_MIN_VALUE &&
+              offset_HX711_N1_ChannelA < TARE_MAX_VALUE;
     
     if (isnan(offset_HX711_N1_ChannelA) || offset_HX711_N1_ChannelA == 0.0 || !tareValide) {
         //=======================================================================
@@ -973,7 +992,9 @@ void setup() {
                 offset_HX711_N1_ChannelA = sum / validReadings;
                 
                 // Sauvegarde dans l'EEPROM pour les prochains démarrages
-                EEPROM.put(0, offset_HX711_N1_ChannelA);
+                tareData.magic = TARE_MAGIC;
+                tareData.offset = offset_HX711_N1_ChannelA;
+                EEPROM.put(EEPROM_ADDR_TARE_A, tareData);
                 EEPROM.commit();  // Valide l'écriture en EEPROM
                 
                 Serial.print("Initialisation tare HX711 Channel A : moyenne de ");
