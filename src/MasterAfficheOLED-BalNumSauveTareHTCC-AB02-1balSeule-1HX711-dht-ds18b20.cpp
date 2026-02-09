@@ -308,6 +308,8 @@ uint8_t moduleNumber = 0;          // Numéro du module (1-32)
 uint16_t batteryVoltageGlobal = 0; // Tension batterie en mV
 float temperatureDS18Global = 0;   // Température DS18B20
 uint32_t weightGlobal = 0;         // Poids en grammes (24 bits utilisés, max ~16777 kg)
+unsigned long lastDisplayMs = 0;   // Derniere mise a jour OLED
+const unsigned long DISPLAY_REFRESH_MS = 5000;
 
 //=============================================================================
 // SECTION 5: CONFIGURATION LORAWAN - OTAA (Over-The-Air Activation)
@@ -477,6 +479,94 @@ void displayOLED() {
 }
 
 //=============================================================================
+// FONCTION: readHX711WeightGrams
+// OBJECTIF: Lire le poids en grammes depuis le HX711
+//=============================================================================
+static uint32_t readHX711WeightGrams(bool verbose, bool fastRead) {
+  float sampleWeight = 0;
+  uint32_t weightValue = 0;
+  bool readOk = false;
+
+  if (verbose) {
+    Serial.println("Lecture balance HX711...");
+  }
+
+  // Test GPIO avant HX711 (comme dans ROM-effacement et calibration)
+  pinMode(PIN_HX711_N1_DATA_OUT, INPUT);
+  pinMode(PIN_HX711_N1_SCK_AND_POWER_DOWN, OUTPUT);
+  digitalWrite(PIN_HX711_N1_SCK_AND_POWER_DOWN, HIGH);
+  delay(100);
+
+  Hx711_N1.begin(PIN_HX711_N1_DATA_OUT, PIN_HX711_N1_SCK_AND_POWER_DOWN, 64);
+
+  if (verbose) {
+    Serial.println("Attente 3 secondes pour stabilisation...");
+    delay(3000);
+  } else {
+    delay(fastRead ? 200 : 3000);
+  }
+
+  if (Hx711_N1.is_ready()) {
+    if (verbose) {
+      Serial.println("HX711 DÉTECTÉ - Lecture en cours...");
+      delay(1000);
+      float dummy = Hx711_N1.get_units();
+      (void)dummy;
+      delay(1000);
+    } else {
+      Hx711_N1.get_units();
+      delay(50);
+    }
+
+    float rawValue = Hx711_N1.get_units();
+    if (verbose) {
+      Serial.print("Valeur brute : ");
+      Serial.println(rawValue, 2);
+      Serial.print("Offset (tare) : ");
+      Serial.println(offset_HX711_N1_ChannelA, 2);
+    }
+
+    sampleWeight = (offset_HX711_N1_ChannelA - rawValue) / calibrationFactor;
+    if (verbose) {
+      Serial.print("Poids calculé : ");
+      Serial.println(sampleWeight, 2);
+    }
+
+    if (sampleWeight < 0) {
+      sampleWeight = 0;
+    } else if (sampleWeight > 16777215) {
+      sampleWeight = 16777215;
+    }
+
+    weightValue = (uint32_t)sampleWeight;
+    readOk = true;
+  } else {
+    if (verbose) {
+      Serial.println("ERREUR : HX711 non disponible après 5s !");
+      Serial.println("Vérifiez câblage et alimentation du capteur");
+    }
+    weightValue = 0;
+  }
+
+  if (verbose) {
+    Serial.print("Weight N1 Channel A : ");
+    Serial.print(weightValue, DEC);
+    Serial.print(" ");
+    Serial.print(weightValue, HEX);
+    Serial.print(" ");
+    Serial.print(weightValue, BIN);
+    Serial.print(" ");
+    Serial.println();
+  }
+
+  if (!readOk && !verbose) {
+    return 0xFFFFFFFF;
+  }
+
+  return weightValue;
+}
+
+//=============================================================================
 // FONCTION: prepareTxFrame
 // OBJECTIF: Préparer la trame de données à envoyer via LoRaWAN
 // 
@@ -643,100 +733,10 @@ static void prepareTxFrame( uint8_t port )
      - Précision: 99% sur toute la plage 0-200kg
   */
   
-  Serial.println("Lecture balance HX711...");
-  float Sample_weight = 0;                    // Poids calculé en grammes
-  uint32_t Weight_HX711_N1_Channel_A = 0; // Poids final (24 bits utilisés pour supporter >100 kg)
-    
-  // Réinitialisation du HX711 avec même séquence que la calibration
-  // Paramètres: (pin_data, pin_sck, gain)
-  // Gain 64 = canal A (balance), gain 32 = canal B
-  
-  // Test GPIO avant HX711 (comme dans ROM-effacement et calibration)
-  pinMode(PIN_HX711_N1_DATA_OUT, INPUT);
-  pinMode(PIN_HX711_N1_SCK_AND_POWER_DOWN, OUTPUT);
-  digitalWrite(PIN_HX711_N1_SCK_AND_POWER_DOWN, HIGH);
-  delay(100);
-  
-  Hx711_N1.begin(PIN_HX711_N1_DATA_OUT, PIN_HX711_N1_SCK_AND_POWER_DOWN, 64);
-  
-  Serial.println("Attente 3 secondes pour stabilisation...");
-  delay(3000); // 3 secondes comme ROM-effacement et calibration
-  
-  if (Hx711_N1.is_ready()) {
-    Serial.println("HX711 DÉTECTÉ - Lecture en cours...");
-    delay(1000);
-    
-    // Lecture dummy pour initialiser la librairie
-    float dummy = Hx711_N1.get_units();
-    delay(1000);
-    
-    //=========================================================================
-    // Lecture de la valeur brute du HX711
-    //=========================================================================
-    // get_units() retourne la valeur brute de l'ADC 24 bits
-    // Valeurs typiques: 250000 à 260000 pour balance vide
-    //                  Valeurs négatives possibles avec du poids (débordement)
-    float raw_value = Hx711_N1.get_units();
-    Serial.print("Valeur brute : ");
-    Serial.println(raw_value, 2);
-    Serial.print("Offset (tare) : ");
-    Serial.println(offset_HX711_N1_ChannelA, 2);
-    
-    //=========================================================================
-    // Calcul du poids en grammes
-    //=========================================================================
-    /* FORMULE: Poids = (Tare - Mesure_actuelle) / Facteur_calibration
-       
-       Pourquoi (Tare - Mesure) et non (Mesure - Tare)?
-       - Les jauges fonctionnent à l'envers: plus de poids = tension plus basse
-       - Donc la mesure DIMINUE quand on ajoute du poids
-       - La différence (Tare - Mesure) donne donc un nombre positif
-       
-       Facteur de calibration (spécifique à chaque balance):
-       - Déterminé expérimentalement avec un poids connu de 16kg
-       - Exemple: si différence = 330000 unités pour 16kg
-       - Facteur = 330000 / 16000 = 20.625 unités/gramme
-       - Chaque balance/module a son propre facteur (variations de fabrication)
-    */
-    Sample_weight = (offset_HX711_N1_ChannelA - Hx711_N1.get_units()) / calibrationFactor;
-    Serial.print("Poids calculé : ");
-    Serial.println(Sample_weight, 2);
-
-    //=========================================================================
-    // Limitation des valeurs (saturation)
-    //=========================================================================
-    // Si poids négatif (erreur ou vibration), mettre à 0
-    if (Sample_weight < 0) { 
-        Sample_weight = 0; 
-    } else { 
-        // Si poids > 16777215g (limite 24 bits), saturer à 16777215
-        // (16777215g = 16777.2kg, largement suffisant pour 200kg max)
-        if (Sample_weight > 16777215) { 
-            Sample_weight = 16777215; 
-        }
-    }
-
-    // Conversion en entier pour transmission
-    Weight_HX711_N1_Channel_A = Sample_weight;
-    
-  } else {
-    //=========================================================================
-    // Gestion d'erreur: HX711 non disponible
-    //=========================================================================
-    Serial.println("ERREUR : HX711 non disponible après 5s !");
-    Serial.println("Vérifiez câblage et alimentation du capteur");
-    Weight_HX711_N1_Channel_A = 0;  // Envoyer 0 en cas d'erreur
+  uint32_t Weight_HX711_N1_Channel_A = readHX711WeightGrams(true, false);
+  if (Weight_HX711_N1_Channel_A == 0xFFFFFFFF) {
+    Weight_HX711_N1_Channel_A = 0;
   }
-
-  // Affichage du poids final en différentes bases (décimal, hexa, binaire)
-  Serial.print("Weight N1 Channel A : ");
-  Serial.print(Weight_HX711_N1_Channel_A,DEC);
-  Serial.print(" "); 
-  Serial.print(Weight_HX711_N1_Channel_A,HEX);
-  Serial.print(" "); 
-  Serial.print(Weight_HX711_N1_Channel_A,BIN);
-  Serial.print(" ");
-  Serial.println();
                   
   //===========================================================================
   // ÉTAPE 6: ENCODAGE DES DONNÉES DANS LE BUFFER LORAWAN
@@ -1178,6 +1178,19 @@ void loop()
      puis on passe à l'état suivant
   */
   
+  if (deviceState != DEVICE_STATE_SEND) {
+    unsigned long now = millis();
+    if (now - lastDisplayMs >= DISPLAY_REFRESH_MS) {
+      uint32_t refreshedWeight = readHX711WeightGrams(false, false);
+      if (refreshedWeight != 0xFFFFFFFF) {
+        weightGlobal = refreshedWeight;
+      }
+      batteryVoltageGlobal = getBatteryVoltage();
+      displayOLED();
+      lastDisplayMs = now;
+    }
+  }
+
 	 switch (deviceState) {
     //===========================================================================
     // ÉTAT 1: INITIALISATION DU STACK LORAWAN
